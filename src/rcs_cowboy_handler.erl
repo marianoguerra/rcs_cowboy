@@ -26,11 +26,13 @@
          to_json/2]).
 
 -record(state, {env_keys, action, json_encoder, json_decoder, param1,
-                user_ctx, group_info, is_authorized, method, base_uri}).
+                user_ctx, group_info, is_authorized, is_user_authorized,
+                method, base_uri}).
 
 init(_, _Req, _Opts) -> {upgrade, protocol, cowboy_rest}.
 
 rest_init(Req, #{env_keys := EnvKeys, is_authorized := IsAuthorizedFun,
+                 is_user_authorized := IsUserAuthorized,
                  json_encoder := JsonEncoder, json_decoder := JsonDecoder,
                  base_uri := BaseUri}) ->
     {Action, Req1} = cowboy_req:binding(action, Req),
@@ -38,6 +40,7 @@ rest_init(Req, #{env_keys := EnvKeys, is_authorized := IsAuthorizedFun,
     {Method, Req3} = method(Req2),
     {ok, Req3, #state{env_keys=EnvKeys, method=Method,
                       action=Action, param1=Param1,
+                      is_user_authorized=IsUserAuthorized,
                       is_authorized=IsAuthorizedFun, base_uri=BaseUri,
                       json_encoder=JsonEncoder, json_decoder=JsonDecoder}}.
 
@@ -49,6 +52,16 @@ content_types_provided(Req, State) ->
 content_types_accepted(Req, State) ->
     {[{{<<"application">>, <<"json">>, '*'}, from_json}], Req, State}.
 
+is_authorized(Req, State=#state{action = <<"sessions">>, method=post,
+                                param1=undefined}) ->
+    case with_auth_body(Req, State, fun do_auth/5) of
+        {{ok, Ctx}, Req1, State1} ->
+            {true, Req1, State1#state{user_ctx=Ctx}};
+        {{error, _Reason}, Req1, State1} ->
+            {{false, <<"auth">>}, Req1, State1};
+        {false, Req1, State1} ->
+            {{false, <<"auth">>}, Req1, State1}
+    end;
 is_authorized(Req, State=#state{action=Action, param1=Param1,
                                 is_authorized=IsAuthorizedFun}) ->
     Info = [{action, Action}, {param1, Param1}],
@@ -93,18 +106,29 @@ delete_resource(Req, State=#state{action = <<"users">>, param1=Username}) ->
 delete_resource(Req, State=#state{action = <<"groups">>, param1=Groupname}) ->
     handle_delete(Req, State, riak_core_security:del_group(Groupname)).
 
-from_json(Req, State=#state{action = <<"groups">>, method=put}) ->
+from_json(Req, State=#state{action = <<"groups">>, method=put,
+                            param1=undefined}) ->
     with_group_body(Req, State, fun do_update_group/5);
-from_json(Req, State=#state{action = <<"groups">>}) ->
+from_json(Req, State=#state{action = <<"groups">>, method=post,
+                            param1=undefined}) ->
     with_group_body(Req, State, fun do_create_group/5);
-from_json(Req, State=#state{action = <<"users">>, method=put}) ->
+from_json(Req, State=#state{action = <<"users">>, method=put,
+                            param1=undefined}) ->
     with_user_body(Req, State, fun do_update_user/6);
-from_json(Req, State=#state{action = <<"users">>}) ->
+from_json(Req, State=#state{action = <<"users">>, method=post,
+                            param1=undefined}) ->
     with_user_body(Req, State, fun do_create_user/6);
-from_json(Req, State=#state{action = <<"grants">>}) ->
+from_json(Req, State=#state{action = <<"grants">>, method=post,
+                            param1=undefined}) ->
     with_grant_body(Req, State, fun do_grant/6);
-from_json(Req, State=#state{action = <<"revokes">>}) ->
+from_json(Req, State=#state{action = <<"revokes">>, method=post,
+                            param1=undefined}) ->
     with_grant_body(Req, State, fun do_revoke/6);
+from_json(Req, State=#state{action = <<"sessions">>, method=post,
+                            is_user_authorized=IsUserAuthorized,
+                            param1=undefined, user_ctx=UserCtx}) ->
+    {IsOk, Req1} = IsUserAuthorized(Req, #{user_ctx => UserCtx}),
+    {IsOk, Req1, State};
 from_json(Req, State=#state{}) ->
     {false, Req, State}.
 
@@ -233,6 +257,17 @@ handle_delete(Req, State=#state{action=Action, param1=Param1}, Other) ->
     lager:error("deleting ~p ~p: ~p", [Action, Param1, Other]),
     {false, Req, State}.
 
+with_auth_body(Req, State, Fun) ->
+    case parse_body(Req, State) of
+        {ok, #{<<"username">> := Username, <<"password">> := Password}=Body,
+         Req1, State1} when is_binary(Username), is_binary(Password) ->
+            Fun(Req1, State1, Body, Username, Password);
+        {ok, _Body, Req1, State1} ->
+            {false, Req1, State1};
+        {error, _Reason, Req1, State1} ->
+            {false, Req1, State1}
+    end.
+
 with_group_body(Req, State, Fun) ->
     case parse_body(Req, State) of
         {ok, #{<<"groupname">> := Groupname, <<"groups">> := Groups}=Body,
@@ -312,6 +347,7 @@ do_revoke(Req, State, Body, Role, Bucket, Permission) ->
               fun () ->
                       riak_core_security:add_revoke(Role, Bucket, Permission)
               end).
+
 do_create_group(Req, State, Body, Groupname, Groups) ->
     do_create(Req, State, Body, "creating group", "groups", Groupname,
               fun () -> create_group(Groupname, Groups) end).
@@ -327,6 +363,13 @@ do_create_user(Req, State, Body, Username, Password, Groups) ->
 do_update_user(Req, State, Body, Username, Password, Groups) ->
     do_update(Req, State, Body, "updating user",
               fun () -> update_user(Username, Password, Groups) end).
+
+do_auth(Req, State, _Body, Username, Password) ->
+    Source = [{ip, {127, 0, 0, 1}}],
+    case riak_core_security:authenticate(Username, Password, Source) of
+        {ok, Ctx} -> {{ok, Ctx}, Req, State};
+        {error, _Reason}=Error -> {Error, Req, State}
+    end.
 
 to_rc_bucket(Bucket, <<"*">>) -> Bucket;
 to_rc_bucket(Bucket, Key) -> {Bucket, Key}.
