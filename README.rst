@@ -13,6 +13,20 @@ we don't list them here to avoid version mismatches.
 Use
 ---
 
+Add the dependency to your rebar.config file.
+
+rebar:
+
+.. code-block:: erlang
+
+    {rcs_cowboy, ".*", {git, "git://github.com/marianoguerra/rcs_cowboy", {branch, "master"}}},
+
+rebar3:
+
+.. code-block:: erlang
+
+    {rcs_cowboy, {git, "git://github.com/marianoguerra/rcs_cowboy", {branch, "master"}}},
+
 in your cowboy routes add something like the following:
 
 
@@ -73,5 +87,7 @@ cowboy route.
 
 Build
 -----
+
+::
 
     $ rebar3 compile
