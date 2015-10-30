@@ -106,14 +106,12 @@ delete_resource(Req, State=#state{action = <<"users">>, param1=Username}) ->
 delete_resource(Req, State=#state{action = <<"groups">>, param1=Groupname}) ->
     handle_delete(Req, State, riak_core_security:del_group(Groupname)).
 
-from_json(Req, State=#state{action = <<"groups">>, method=put,
-                            param1=undefined}) ->
+from_json(Req, State=#state{action = <<"groups">>, method=put}) ->
     with_group_body(Req, State, fun do_update_group/5);
 from_json(Req, State=#state{action = <<"groups">>, method=post,
                             param1=undefined}) ->
     with_group_body(Req, State, fun do_create_group/5);
-from_json(Req, State=#state{action = <<"users">>, method=put,
-                            param1=undefined}) ->
+from_json(Req, State=#state{action = <<"users">>, method=put}) ->
     with_user_body(Req, State, fun do_update_user/6);
 from_json(Req, State=#state{action = <<"users">>, method=post,
                             param1=undefined}) ->
